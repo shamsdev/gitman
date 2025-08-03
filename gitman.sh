@@ -67,7 +67,7 @@ handle_request() {
     "/update")
       # Checks out the branch and pulls changes. GIT_TERMINAL_PROMPT=0 makes it fail instead of asking for a password.
       output=$(GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" checkout "$GIT_BRANCH" && GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" pull origin "$GIT_BRANCH" 2>&1)
-      http_response "200 OK" "text/plain; charset=utf-8" "Update process started...\n\n$output"
+      http_response "200 OK" "text/plain; charset=utf-8" "$output"
       ;;
     *)
       http_response "404 Not Found" "text/plain" "Endpoint not found. Available endpoints: /logs, /branch, /update"
