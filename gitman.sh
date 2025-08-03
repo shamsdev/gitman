@@ -6,7 +6,6 @@ load_env() {
     echo "🔴 Error: .env file not found."
     exit 1
   fi
-
   # Export variables from .env file
   export $(grep -v '^#' .env | xargs)
 
@@ -66,8 +65,9 @@ handle_request() {
       http_response "200 OK" "text/plain; charset=utf-8" "$output"
       ;;
     "/update")
-      # Checks out the specified branch and pulls the latest changes
-      output=$(git -C "$GIT_REPO_PATH" checkout "$GIT_BRANCH" && git -C "$GIT_REPO_PATH" pull origin "$GIT_BRANCH" 2>&1)
+      # ✨ MODIFIED LINE ✨
+      # Checks out the branch and pulls changes. GIT_TERMINAL_PROMPT=0 makes it fail instead of asking for a password.
+      output=$(GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" checkout "$GIT_BRANCH" && GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" pull origin "$GIT_BRANCH" 2>&1)
       http_response "200 OK" "text/plain; charset=utf-8" "Update process started...\n\n$output"
       ;;
     *)
@@ -82,15 +82,26 @@ main() {
   # Use PORT from .env file, with 8080 as a fallback
   local port=${PORT:-8080}
 
+  # Create a temporary named pipe to manage the request/response flow
+  local backpipe
+  backpipe=$(mktemp -u)
+  mkfifo "$backpipe"
+  # Make sure the pipe is removed when the script exits (e.g., with Ctrl+C)
+  trap 'rm -f "$backpipe"' EXIT
+
   echo "🚀 Gitman is running on http://localhost:$port"
   echo "📁 Repository: $GIT_REPO_PATH"
   echo "🌿 Branch: $GIT_BRANCH"
   echo "Press Ctrl+C to stop."
 
-  # The `while true` loop ensures the server stays running.
-  # `nc` (netcat) listens for a connection, pipes it to our handler, and sends the response back.
   while true; do
-    handle_request | nc -l -p "$port" -q 1
+    # This complex-looking line does the following:
+    # 1. nc listens for a request and prints it to its output.
+    # 2. The request is piped to handle_request.
+    # 3. handle_request processes the request and writes the response to the "backpipe".
+    # 4. cat reads the response from the "backpipe" and sends it to nc's input.
+    # 5. nc sends the response back to the client.
+    cat "$backpipe" | nc -l -p "$port" | (handle_request > "$backpipe")
   done
 }
 
