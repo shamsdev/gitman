@@ -55,8 +55,8 @@ handle_request() {
   # 2. --- API Routing ---
   case "$path" in
     "/logs")
-      # Returns last 3 commits on the specified branch
-      output=$(git -C "$GIT_REPO_PATH" log --branch "$GIT_BRANCH" -n 3 --pretty=format:'%h - %an, %ar : %s' 2>&1)
+      # Returns last 3 commits on the specified branch.
+      output=$(git -C "$GIT_REPO_PATH" log "$GIT_BRANCH" -n 3 --pretty=format:'%h - %an, %ar : %s' 2>&1)
       http_response "200 OK" "text/plain; charset=utf-8" "$output"
       ;;
     "/branch")
@@ -65,7 +65,6 @@ handle_request() {
       http_response "200 OK" "text/plain; charset=utf-8" "$output"
       ;;
     "/update")
-      # ✨ MODIFIED LINE ✨
       # Checks out the branch and pulls changes. GIT_TERMINAL_PROMPT=0 makes it fail instead of asking for a password.
       output=$(GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" checkout "$GIT_BRANCH" && GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" pull origin "$GIT_BRANCH" 2>&1)
       http_response "200 OK" "text/plain; charset=utf-8" "Update process started...\n\n$output"
