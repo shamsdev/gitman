@@ -1,108 +1,125 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -eu
 
-# --- Function to load .env file ---
+# --- load .env ---
 load_env() {
   if [ ! -f .env ]; then
-    echo "🔴 Error: .env file not found."
+    echo "🔴 .env not found" >&2
     exit 1
   fi
-
-  # Export variables from .env file
   export $(grep -v '^#' .env | xargs)
-
-  # Validate required vars
-  if [ -z "$GIT_REPO_PATH" ] || [ -z "$GIT_BRANCH" ] || [ -z "$API_KEY" ]; then
-    echo "🔴 Error: GIT_REPO_PATH, GIT_BRANCH, and API_KEY must be set in .env"
+  : "${GIT_REPO_PATH:?set in .env}"
+  : "${GIT_BRANCH:?set in .env}"
+  : "${API_KEY:?set in .env}"
+  if [ ! -d "$GIT_REPO_PATH/.git" ]; then
+    echo "🔴 $GIT_REPO_PATH is not a git repo" >&2
     exit 1
   fi
-
-  # Validate repository path
-  if [ ! -d "$GIT_REPO_PATH/.git" ]; then
-      echo "🔴 Error: '$GIT_REPO_PATH' is not a valid git repository."
-      exit 1
-  fi
 }
 
-# --- Function to send a standard HTTP response with CORS ---
+# --- send HTTP response with CORS ---
 http_response() {
-  local status="$1"
-  local content_type="$2"
+  local status="$1"         # e.g. "200 OK" or "204 No Content"
+  local content_type="$2"  # e.g. "text/plain"
   local body="$3"
-  local content_length=${#body}
+  local origin="$4"        # origin to echo (may be empty)
 
-  echo -e "HTTP/1.1 ${status}\r\n\
-Access-Control-Allow-Origin: *\r\n\
-Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-Access-Control-Allow-Headers: Content-Type, X-API-Key\r\n\
-Content-Type: ${content_type}\r\n\
-Content-Length: ${content_length}\r\n\
-Connection: close\r\n\r\n${body}"
+  local content_length=${#body}
+  local acao="Access-Control-Allow-Origin: *"
+  if [ -n "$origin" ]; then
+    acao="Access-Control-Allow-Origin: ${origin}"
+  fi
+
+  cat <<EOF
+HTTP/1.1 ${status}
+${acao}
+Access-Control-Allow-Methods: GET, POST, OPTIONS
+Access-Control-Allow-Headers: Content-Type, X-API-Key
+Access-Control-Max-Age: 86400
+Vary: Origin
+Content-Type: ${content_type}
+Content-Length: ${content_length}
+Connection: close
+
+${body}
+EOF
 }
 
-# --- Function to handle incoming request ---
+# --- handle a single request (reads from stdin) ---
 handle_request() {
-  # Read request method, path, version
-  read -r method path version
+  # read request line
+  IFS=$' \t' read -r method raw_path version || return
 
-  # Extract API key header
+  # read headers
+  origin=""
   client_api_key=""
+  host=""
   while read -r header && [ "$header" != $'\r' ]; do
-    if [[ "$header" =~ ^X-API-Key: ]]; then
-      client_api_key=$(echo "$header" | cut -d' ' -f2- | tr -d '\r')
-    fi
+    # log header for debugging
+    echo "H: $header" >&2
+    case "$header" in
+      Origin:*)
+        origin=$(echo "$header" | cut -d' ' -f2- | tr -d '\r')
+        ;;
+      "X-API-Key:"*|"X-Api-Key:"*)
+        client_api_key=$(echo "$header" | cut -d' ' -f2- | tr -d '\r')
+        ;;
+      Host:*)
+        host=$(echo "$header" | cut -d' ' -f2- | tr -d '\r')
+        ;;
+    esac
   done
 
-  # Handle preflight OPTIONS request
+  # Log request-line for debugging
+  echo "=> ${method} ${raw_path} from Origin=${origin} Host=${host}" >&2
+
+  # Normalize path (drop query string)
+  path="${raw_path%%\?*}"
+
+  # Handle preflight immediately (no auth, no redirect)
   if [ "$method" = "OPTIONS" ]; then
-    http_response "204 No Content" "text/plain" ""
+    http_response "204 No Content" "text/plain" "" "${origin}"
     return
   fi
 
-  # Authentication
+  # Auth (only for non-OPTIONS)
   if [ "$client_api_key" != "$API_KEY" ]; then
-    http_response "401 Unauthorized" "text/plain" "Authentication failed. Provide a valid X-API-Key header."
+    http_response "401 Unauthorized" "text/plain" "Authentication failed. Provide X-API-Key" "${origin}"
     return
   fi
 
-  # API Routing
   case "$path" in
-    "/logs")
+    /logs)
       output=$(git -C "$GIT_REPO_PATH" log "$GIT_BRANCH" -n 3 --pretty=format:'%h - %an, %ar : %s' 2>&1)
-      http_response "200 OK" "text/plain; charset=utf-8" "$output"
+      http_response "200 OK" "text/plain; charset=utf-8" "$output" "${origin}"
       ;;
-    "/branch")
+    /branch)
       output=$(git -C "$GIT_REPO_PATH" rev-parse --abbrev-ref HEAD 2>&1)
-      http_response "200 OK" "text/plain; charset=utf-8" "$output"
+      http_response "200 OK" "text/plain; charset=utf-8" "$output" "${origin}"
       ;;
-    "/update")
+    /update)
       output=$(GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" checkout "$GIT_BRANCH" && GIT_TERMINAL_PROMPT=0 git -C "$GIT_REPO_PATH" pull origin "$GIT_BRANCH" 2>&1)
-      http_response "200 OK" "text/plain; charset=utf-8" "$output"
+      http_response "200 OK" "text/plain; charset=utf-8" "$output" "${origin}"
       ;;
     *)
-      http_response "404 Not Found" "text/plain" "Endpoint not found. Available endpoints: /logs, /branch, /update"
+      http_response "404 Not Found" "text/plain" "Endpoint not found. Available: /logs /branch /update" "${origin}"
       ;;
   esac
 }
 
-# --- Main Server Loop ---
 main() {
   load_env
-  local port=${PORT:-8080}
-
-  local backpipe
+  port=${PORT:-8080}
   backpipe=$(mktemp -u)
   mkfifo "$backpipe"
   trap 'rm -f "$backpipe"' EXIT
 
-  echo "🚀 Gitman is running on http://localhost:$port"
-  echo "📁 Repository: $GIT_REPO_PATH"
-  echo "🌿 Branch: $GIT_BRANCH"
-  echo "Press Ctrl+C to stop."
+  echo "🚀 Gitman on http://localhost:$port (listening)" >&2
 
   while true; do
+    # The same fan-in/out trick: cat reads response, nc listens, request piped to handler
     cat "$backpipe" | nc -l -p "$port" | (handle_request > "$backpipe")
   done
 }
 
-# --- Start Server ---
 main
